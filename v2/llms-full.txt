@@ -371,7 +371,7 @@ ReActAgent agent =
                 .sysPrompt("You are a helpful assistant.")
                 // Resolved by ModelRegistry; reads DASHSCOPE_API_KEY automatically.
                 // Switch providers by using "openai:gpt-5.5" / "anthropic:claude-sonnet-4-5"
-                // / "gemini:gemini-2.0-flash" / "ollama:llama3".
+                // / "deepseek:deepseek-v4-flash" / "gemini:gemini-2.0-flash" / "ollama:llama3".
                 .model("dashscope:qwen-plus")
                 .toolkit(new Toolkit())
                 .build();
@@ -429,7 +429,7 @@ ReActAgent agent =
 ::::
 
 :::{tip}
-The `ModelRegistry` string form (`<provider>:<model>`) requires the matching model extension module on the classpath. It supports `dashscope` / `openai` / `anthropic` / `gemini` / `ollama` and reads the matching API key (`DASHSCOPE_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`) from the environment. For long-running scenarios that also need a workspace, session persistence, memory compaction, subagents, and so on, use [`HarnessAgent`](../harness/architecture.md) — it is a thin wrapper around `ReActAgent` with a largely identical builder.
+The `ModelRegistry` string form (`<provider>:<model>`) requires the matching model extension module on the classpath. It supports `dashscope` / `openai` / `deepseek` / `anthropic` / `gemini` / `ollama` and reads the matching API key (`DASHSCOPE_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`) from the environment. For long-running scenarios that also need a workspace, session persistence, memory compaction, subagents, and so on, use [`HarnessAgent`](../harness/architecture.md) — it is a thin wrapper around `ReActAgent` with a largely identical builder.
 :::
 
 ### Builder fields
@@ -1827,7 +1827,7 @@ Other provider artifacts follow the same pattern: `agentscope-extensions-model-o
 
 ### String model id
 
-For simple non-Spring applications, use a `ModelRegistry` string id such as `dashscope:qwen-plus` or `openai:gpt-4.1-mini`. Add the matching model extension module, set the provider's standard environment variable such as `DASHSCOPE_API_KEY` or `OPENAI_API_KEY`, and pass the id directly to the agent:
+For simple non-Spring applications, use a `ModelRegistry` string id such as `dashscope:qwen-plus`, `openai:gpt-4.1-mini`, or `deepseek:deepseek-v4-flash`. Add the matching model extension module, set the provider's standard environment variable such as `DASHSCOPE_API_KEY`, `OPENAI_API_KEY`, or `DEEPSEEK_API_KEY`, and pass the id directly to the agent:
 
 ```java
 ReActAgent agent =
@@ -1837,7 +1837,7 @@ ReActAgent agent =
                 .build();
 ```
 
-The extension module is discovered through Java SPI. The model provider reads its standard environment variables such as `DASHSCOPE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`. Ollama reads `OLLAMA_BASE_URL` when present and otherwise defaults to the local Ollama endpoint.
+The extension module is discovered through Java SPI. The model provider reads its standard environment variables such as `DASHSCOPE_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `GLM_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY`. Ollama reads `OLLAMA_BASE_URL` when present and otherwise defaults to the local Ollama endpoint.
 
 ### Explicit model builder
 
@@ -3598,6 +3598,26 @@ AgentState restored = AgentState.fromJsonString(json);
 | `contextMutable()` | Writable view, use with care |
 | `setSummary(...)` / `getSummary()` | Custom compaction summary (for your own compaction middleware) |
 | `toJson()` / `fromJsonString(String)` | Serialize / deserialize |
+
+### Clearing a session's conversation context
+
+To let a user start a fresh topic without creating a new session, call `clearContext`. It keeps the
+same `(userId, sessionId)` and preserves non-conversation state such as permissions, tools, tasks,
+and Plan Mode. It clears the model-visible message buffer and compaction summary, then immediately
+persists the result when the agent has an `AgentStateStore`.
+
+```java
+agent.clearContext("alice", "session-001");
+
+// Or use the same RuntimeContext used by calls.
+agent.clearContext(RuntimeContext.builder()
+    .userId("alice")
+    .sessionId("session-001")
+    .build());
+```
+
+Call it after the session's current request has completed. It does not cancel an in-flight call;
+the next call starts with the cleared conversation context.
 
 :::{note}
 The 1.0 `Memory` interface (`InMemoryMemory` / `LongTermMemory`, etc.) is `@Deprecated(forRemoval = true)` in 2.0. New code should use `AgentState.getContext()` + an `AgentStateStore`; `Memory` remains only as a source-compat shim.
@@ -7120,6 +7140,16 @@ Detail → [Harness filesystem](harness/filesystem.md)
 
 The capabilities below are additive in 2.0 — none of them break 1.x code. The Migration Guide above already covers the event system, message refactor, and middleware mechanism, so they are not repeated here.
 
+### AG-UI v2
+
+- The AG-UI adapter now uses the v2 `streamEvents()` path. Normal `RUN_STARTED` / `RUN_FINISHED` events are converted from `AgentStartEvent` / `AgentEndEvent`; error paths emit `RUN_ERROR` and a fallback `RUN_FINISHED`.
+- New `AgentEventConverter` and `AguiEventEnricher` extension points: converters handle semantic mapping, while enrichers handle cross-cutting properties such as `timestamp` / `rawEvent`. The Spring Boot starter automatically collects both bean types.
+- Every `AguiEvent` supports AG-UI base event properties. `BaseEventPropertiesEnricher` is disabled by default; when explicitly enabled, it only fills missing `timestamp` values and does not default `rawEvent`.
+- `AguiAdapterConfig.emitTokenUsage` can emit `CUSTOM token_usage` events with model-call delta and run-level cumulative token usage.
+- The Spring Boot starter supports `AguiRuntimeContextResolver`, custom `AguiAgentAdapterFactory`, frontend tool injection / merge mode, and HITL interrupt output.
+
+Detail → [AG-UI](../integration/protocol/agui.md)
+
 ### Toolkit & Permission
 
 Tool execution is the main extension surface in 2.0, and the permission system sits directly on its execution path — so we present them together.
@@ -8022,6 +8052,10 @@ All model providers have moved to independent model extension modules, while `ag
 | Provider | Maven artifact | `ModelRegistry` id | Standard environment variable | Docs |
 |----------|----------------|--------------------|-------------------------------|------|
 | OpenAI | `agentscope-extensions-model-openai` | `openai:<model>` | `OPENAI_API_KEY` | <a class="reference internal" href="model/openai.html">OpenAI</a> |
+| DeepSeek | `agentscope-extensions-model-openai` | `deepseek:<model>` | `DEEPSEEK_API_KEY` | <a class="reference internal" href="model/deepseek.html">DeepSeek</a> |
+| GLM | `agentscope-extensions-model-openai` | `glm:<model>` | `ZAI_API_KEY` / `GLM_API_KEY` / `ZHIPUAI_API_KEY` | <a class="reference internal" href="model/glm.html">GLM</a> |
+| Kimi | `agentscope-extensions-model-openai` | `kimi:<model>` | `MOONSHOT_API_KEY` / `KIMI_API_KEY` | <a class="reference internal" href="model/kimi.html">Kimi</a> |
+| MiniMax | `agentscope-extensions-model-openai` | `minimax:<model>` | `MINIMAX_API_KEY` | <a class="reference internal" href="model/minimax.html">MiniMax</a> |
 | DashScope | `agentscope-extensions-model-dashscope` | `dashscope:<model>` / `qwen*` | `DASHSCOPE_API_KEY` | <a class="reference internal" href="model/dashscope.html">DashScope</a> |
 | Gemini | `agentscope-extensions-model-gemini` | `gemini:<model>` | `GEMINI_API_KEY` | <a class="reference internal" href="model/gemini.html">Gemini</a> |
 | Anthropic | `agentscope-extensions-model-anthropic` | `anthropic:<model>` | `ANTHROPIC_API_KEY` | <a class="reference internal" href="model/anthropic.html">Anthropic</a> |
@@ -8114,6 +8148,581 @@ Runtime, language, debugging, and training extensions.
 ```{note}
 For Spring Boot users, most of the above extensions ship a matching `agentscope-spring-boot-starter-*` for one-line integration that removes the manual wiring.
 ```
+
+---
+
+Source: https://java.agentscope.io/_sources/v2/en/integration/model/index.md
+
+# Model Providers
+
+Model provider extensions connect AgentScope Java to hosted or local chat model APIs. Each provider can be selected through a `ModelRegistry` id when its extension module is on the classpath.
+
+- [OpenAI](openai.md)
+- [DeepSeek](deepseek.md)
+- [GLM](glm.md)
+- [Kimi](kimi.md)
+- [MiniMax](minimax.md)
+- [DashScope](dashscope.md)
+- [Gemini](gemini.md)
+- [Anthropic](anthropic.md)
+- [Ollama](ollama.md)
+
+---
+
+Source: https://java.agentscope.io/_sources/v2/en/integration/model/openai.md
+
+# OpenAI Model
+
+`agentscope-extensions-model-openai` integrates OpenAI Chat Completions-style models. It is also the module to use for OpenAI-compatible endpoints such as DeepSeek, GLM, Kimi, MiniMax, and similar services when their wire format follows the OpenAI API.
+
+## Add the dependency
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-model-openai</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+## ModelRegistry
+
+Set `OPENAI_API_KEY`, then use the `openai:<model>` id:
+
+```java
+ReActAgent agent = ReActAgent.builder()
+    .name("assistant")
+    .model("openai:gpt-4.1-mini") // Resolved internally by ModelRegistry.resolve(modelId)
+    .build();
+```
+
+## Explicit builder
+
+Use the builder when you need a custom endpoint, formatter, transport, or generation options:
+
+```java
+import io.agentscope.extensions.model.openai.OpenAIChatModel;
+
+OpenAIChatModel model = OpenAIChatModel.builder()
+    .apiKey(System.getenv("OPENAI_API_KEY"))
+    .modelName("gpt-4.1-mini")
+    .stream(true)
+    .build();
+```
+
+## Spring Boot
+
+Spring Boot applications can use the OpenAI starter:
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-openai-spring-boot-starter</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+Full builder options, formatters, credentials, and registry context details are covered in [Model](../../docs/building-blocks/model.md).
+
+---
+
+Source: https://java.agentscope.io/_sources/v2/en/integration/model/deepseek.md
+
+# DeepSeek Model
+
+`agentscope-extensions-model-openai` provides first-class DeepSeek support through the OpenAI-compatible model stack. Add the OpenAI model extension module, then use `deepseek:<model>` with `ModelRegistry`.
+
+## Add the dependency
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-model-openai</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+## ModelRegistry
+
+Set `DEEPSEEK_API_KEY`, then use the `deepseek:<model>` id:
+
+```java
+ReActAgent agent = ReActAgent.builder()
+    .name("assistant")
+    .model("deepseek:deepseek-v4-flash") // Resolved internally by ModelRegistry.resolve(modelId)
+    .build();
+```
+
+The provider defaults to `https://api.deepseek.com`, strips the `deepseek:` prefix before sending the model name, and uses the DeepSeek formatter from `io.agentscope.extensions.model.openai.compat.deepseek`.
+
+## Thinking mode
+
+Enable DeepSeek thinking mode through `ModelCreationContext` when resolving the model:
+
+```java
+import io.agentscope.core.model.Model;
+import io.agentscope.core.model.ModelCreationContext;
+import io.agentscope.core.model.ModelRegistry;
+
+Model model = ModelRegistry.resolve(
+    "deepseek:deepseek-v4-flash",
+    ModelCreationContext.builder()
+        .enableThinking(true)
+        .build());
+```
+
+Streaming callers can render `ThinkingBlockDeltaEvent` separately from `TextBlockDeltaEvent`.
+
+## Compatibility notes
+
+The DeepSeek formatter preserves DeepSeek-compatible message fields, including `system` roles and supported `name` fields. It also removes stale reasoning content from previous turns while preserving reasoning content needed by current tool-call context.
+
+DeepSeek's stable endpoint does not use the tool schema `strict` field by default, so the default formatter omits `strict` even when a tool is registered with strict schema validation. Structured output uses the normal AgentScope fallback behavior unless you explicitly configure native structured output for a compatible endpoint.
+
+For beta or compatible endpoints, pass `baseUrl`, `endpointPath`, generation options, or formatter overrides through `ModelCreationContext`.
+
+---
+
+Source: https://java.agentscope.io/_sources/v2/en/integration/model/glm.md
+
+# GLM Model
+
+`agentscope-extensions-model-openai` provides first-class GLM (Zhipu AI / Z.AI) support through the OpenAI-compatible model stack. Add the OpenAI model extension module, then use `glm:<model>` with `ModelRegistry`.
+
+## Add the dependency
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-model-openai</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+## ModelRegistry
+
+Set `ZAI_API_KEY`, `GLM_API_KEY`, or `ZHIPUAI_API_KEY`, then use the `glm:<model>` id:
+
+```java
+ReActAgent agent = ReActAgent.builder()
+    .name("assistant")
+    .model("glm:glm-5.2") // Resolved internally by ModelRegistry.resolve(modelId)
+    .build();
+```
+
+The provider defaults to `https://open.bigmodel.cn/api/paas/v4`, strips the `glm:` prefix before sending the model name, and uses the GLM formatter from `io.agentscope.extensions.model.openai.compat.glm`.
+
+## Thinking mode
+
+Pass GLM thinking options through `GenerateOptions` when resolving the model:
+
+```java
+import io.agentscope.core.model.GenerateOptions;
+import io.agentscope.core.model.Model;
+import io.agentscope.core.model.ModelCreationContext;
+import io.agentscope.core.model.ModelRegistry;
+import java.util.Map;
+
+Model model = ModelRegistry.resolve(
+    "glm:glm-5.2",
+    ModelCreationContext.builder()
+        .component(
+            GenerateOptions.class,
+            GenerateOptions.builder()
+                .additionalBodyParam("thinking", Map.of("type", "disabled"))
+                .reasoningEffort("max")
+                .build())
+        .build());
+```
+
+GLM-4.7 and GLM-5 series enable thinking by default. GLM-5.2 also supports `reasoning_effort`, and streaming tool-call arguments can be enabled with `additionalBodyParam("tool_stream", true)`.
+
+## Compatibility notes
+
+The GLM formatter adapts OpenAI-style requests to the GLM chat-completions API. It ensures at least one user message exists, removes unsupported message `name` fields, omits tool schema `strict`, and strips unsupported request fields such as `frequency_penalty`, `presence_penalty`, `thinking_budget`, and `stream_options`.
+
+GLM only supports `max_tokens`, so `max_completion_tokens` is mapped to `max_tokens` when `max_tokens` is not already set. `temperature` and `top_p` are clamped to the GLM-supported ranges.
+
+GLM only accepts `tool_choice=auto`. Forced choices are degraded to `auto`; `ToolChoice.None` removes tools from the request to preserve the no-tool-call contract.
+
+Structured output uses the normal AgentScope fallback behavior by default because GLM `response_format` only supports `json_object`. Only enable native structured output when you have confirmed the target endpoint supports the behavior you need.
+
+For compatible or self-hosted endpoints, pass `baseUrl`, `endpointPath`, generation options, or formatter overrides through `ModelCreationContext`.
+
+---
+
+Source: https://java.agentscope.io/_sources/v2/en/integration/model/kimi.md
+
+# Kimi Model
+
+`agentscope-extensions-model-openai` provides first-class Kimi (Moonshot AI) support through the OpenAI-compatible model stack. Add the OpenAI model extension module, then use `kimi:<model>` with `ModelRegistry`.
+
+## Add the dependency
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-model-openai</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+## ModelRegistry
+
+Set `MOONSHOT_API_KEY` or `KIMI_API_KEY`, then use the `kimi:<model>` id:
+
+```java
+ReActAgent agent = ReActAgent.builder()
+    .name("assistant")
+    .model("kimi:kimi-k3") // Resolved internally by ModelRegistry.resolve(modelId)
+    .build();
+```
+
+The provider defaults to `https://api.moonshot.cn/v1`, strips the `kimi:` prefix before sending the model name, and uses the Kimi formatter from `io.agentscope.extensions.model.openai.compat.kimi`.
+
+## Thinking mode
+
+Pass Kimi thinking options through `GenerateOptions` when resolving the model:
+
+```java
+import io.agentscope.core.model.GenerateOptions;
+import io.agentscope.core.model.Model;
+import io.agentscope.core.model.ModelCreationContext;
+import io.agentscope.core.model.ModelRegistry;
+import java.util.Map;
+
+Model model = ModelRegistry.resolve(
+    "kimi:kimi-k2.6",
+    ModelCreationContext.builder()
+        .component(
+            GenerateOptions.class,
+            GenerateOptions.builder()
+                .additionalBodyParam("thinking", Map.of("type", "disabled"))
+                .maxCompletionTokens(16000)
+                .build())
+        .build());
+```
+
+`kimi-k3` uses the top-level `reasoning_effort` option (`low`, `high`, or `max`). `kimi-k3` and `kimi-k2.7-code` always run with thinking enabled. `kimi-k2.6` and `kimi-k2.5` enable thinking by default, but can disable it with `additionalBodyParam("thinking", Map.of("type", "disabled"))`.
+
+## Compatibility notes
+
+The Kimi formatter adapts OpenAI-style requests to the Kimi chat-completions API. It omits tool schema `strict`, preserves assistant `reasoning_content` in message history, and strips unsupported request fields such as `thinking_budget`.
+
+On `kimi-*` models, sampling parameters such as `temperature`, `top_p`, `n`, `frequency_penalty`, and `presence_penalty` are fixed by the platform and are removed from requests. The `moonshot-v1` series keeps those parameters. Kimi documents `max_completion_tokens`, so `max_tokens` is mapped to `max_completion_tokens` when `max_completion_tokens` is not already set.
+
+`reasoning_effort` is kept only for `kimi-k3`. For K2.x thinking controls, pass the `thinking` body parameter through `GenerateOptions.additionalBodyParam`.
+
+`tool_choice=auto` and `tool_choice=none` are supported broadly. `tool_choice=required` is degraded to `auto` on K2.x models. Forcing a specific function is incompatible with thinking enabled, so it is degraded to `auto` on `kimi-k3`, on `kimi-k2.7-code`, and on `kimi-k2.6` / `kimi-k2.5` unless `thinking.type` is explicitly set to `disabled`.
+
+Structured output uses the normal AgentScope fallback behavior by default.
+
+For compatible or self-hosted endpoints, pass `baseUrl`, `endpointPath`, generation options, or formatter overrides through `ModelCreationContext`.
+
+---
+
+Source: https://java.agentscope.io/_sources/v2/en/integration/model/minimax.md
+
+# MiniMax Model
+
+`agentscope-extensions-model-openai` provides first-class MiniMax support through the OpenAI-compatible model stack. Add the OpenAI model extension module, then use `minimax:<model>` with `ModelRegistry`.
+
+## Add the dependency
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-model-openai</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+## ModelRegistry
+
+Set `MINIMAX_API_KEY`, then use the `minimax:<model>` id:
+
+```java
+ReActAgent agent = ReActAgent.builder()
+    .name("assistant")
+    .model("minimax:MiniMax-M3") // Resolved internally by ModelRegistry.resolve(modelId)
+    .build();
+```
+
+The provider base URL defaults to `https://api.minimaxi.com/v1`. `OpenAIClient` appends the default chat completions endpoint, so the final request URL is `https://api.minimaxi.com/v1/chat/completions`, matching the MiniMax OpenAI-compatible API. The provider strips the `minimax:` prefix before sending the model name and uses the MiniMax formatter from `io.agentscope.extensions.model.openai.compat.minimax`.
+
+## Thinking mode
+
+Pass MiniMax thinking options through `ModelCreationContext` when resolving the model:
+
+```java
+import io.agentscope.core.model.Model;
+import io.agentscope.core.model.ModelCreationContext;
+import io.agentscope.core.model.ModelRegistry;
+
+Model model = ModelRegistry.resolve(
+    "minimax:MiniMax-M3",
+    ModelCreationContext.builder()
+        .enableThinking(false)
+        .build());
+```
+
+`enableThinking(false)` sends `thinking: {"type": "disabled"}` and `enableThinking(true)` sends `thinking: {"type": "adaptive"}`. MiniMax-M3 uses adaptive thinking by default when `thinking` is omitted; M2.x models keep thinking enabled even when disabled is requested. The formatter enables `reasoning_split` by default so MiniMax thinking content can be parsed as `ThinkingBlock`.
+
+## Compatibility notes
+
+The MiniMax formatter adapts OpenAI-style requests to the MiniMax OpenAI-compatible Chat Completions API. It maps `max_tokens` to `max_completion_tokens`, because MiniMax marks `max_tokens` as deprecated.
+
+MiniMax tool definitions support function tools, but the official schema does not include the tool schema `strict` field, so the default formatter omits `strict` even when a tool is registered with strict schema validation. MiniMax also does not document `tool_choice`, so explicit tool-choice settings are removed from MiniMax requests.
+
+The formatter removes unsupported OpenAI-only request fields such as `reasoning_effort`, `frequency_penalty`, `presence_penalty`, `thinking_budget`, `parallel_tool_calls`, `response_format`, and `seed`. Structured output uses the normal AgentScope fallback behavior by default because MiniMax does not document OpenAI `response_format` support for schema-constrained output.
+
+For compatible or self-hosted endpoints, pass `baseUrl`, `endpointPath`, generation options, or formatter overrides through `ModelCreationContext`.
+
+---
+
+Source: https://java.agentscope.io/_sources/v2/en/integration/model/dashscope.md
+
+# DashScope Model
+
+`agentscope-extensions-model-dashscope` integrates Alibaba Cloud DashScope Qwen models, including multimodal and reasoning-capable Qwen models.
+
+## Add the dependency
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-model-dashscope</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+## ModelRegistry
+
+Set `DASHSCOPE_API_KEY`, then use either `dashscope:<model>` or the Qwen short form:
+
+```java
+ReActAgent agent = ReActAgent.builder()
+    .name("assistant")
+    .model("dashscope:qwen-plus") // Resolved internally by ModelRegistry.resolve(modelId)
+    .build();
+```
+
+```java
+ReActAgent agent = ReActAgent.builder()
+    .name("assistant")
+    .model("qwen-plus") // Resolved internally by ModelRegistry.resolve(modelId)
+    .build();
+```
+
+## Explicit builder
+
+Use the builder when you need DashScope-specific options such as endpoint type, thinking, search, encryption:
+
+```java
+import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
+
+DashScopeChatModel model = DashScopeChatModel.builder()
+    .apiKey(System.getenv("DASHSCOPE_API_KEY"))
+    .modelName("qwen-plus")
+    .stream(true)
+    .build();
+```
+
+## Spring Boot
+
+Spring Boot applications can use the DashScope starter:
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-dashscope-spring-boot-starter</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+Full builder options, formatters, credentials, and registry context details are covered in [Model](../../docs/building-blocks/model.md).
+
+---
+
+Source: https://java.agentscope.io/_sources/v2/en/integration/model/gemini.md
+
+# Gemini Model
+
+`agentscope-extensions-model-gemini` integrates Google Gemini models through the Gemini API and supports the Vertex AI path through explicit configuration.
+
+## Add the dependency
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-model-gemini</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+## ModelRegistry
+
+Set `GEMINI_API_KEY`, then use the `gemini:<model>` id:
+
+```java
+ReActAgent agent = ReActAgent.builder()
+    .name("assistant")
+    .model("gemini:gemini-2.0-flash") // Resolved internally by ModelRegistry.resolve(modelId)
+    .build();
+```
+
+## Explicit builder
+
+Use the builder when you need custom API settings, Vertex AI credentials, formatter, transport, or generation options:
+
+```java
+import io.agentscope.extensions.model.gemini.GeminiChatModel;
+
+GeminiChatModel model = GeminiChatModel.builder()
+    .apiKey(System.getenv("GEMINI_API_KEY"))
+    .modelName("gemini-2.0-flash")
+    .streamEnabled(true)
+    .build();
+```
+
+## Spring Boot
+
+Spring Boot applications can use the Gemini starter:
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-gemini-spring-boot-starter</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+Full builder options, formatters, credentials, and registry context details are covered in [Model](../../docs/building-blocks/model.md).
+
+---
+
+Source: https://java.agentscope.io/_sources/v2/en/integration/model/anthropic.md
+
+# Anthropic Model
+
+`agentscope-extensions-model-anthropic` integrates Anthropic Claude models, including Anthropic-specific formatter and request DTO support.
+
+## Add the dependency
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-model-anthropic</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+## ModelRegistry
+
+Set `ANTHROPIC_API_KEY`, then use the `anthropic:<model>` id:
+
+```java
+ReActAgent agent = ReActAgent.builder()
+    .name("assistant")
+    .model("anthropic:claude-sonnet-4.5") // Resolved internally by ModelRegistry.resolve(modelId)
+    .build();
+```
+
+## Explicit builder
+
+Use the builder when you need a custom endpoint, formatter, transport, prompt caching, thinking, or generation options:
+
+```java
+import io.agentscope.extensions.model.anthropic.AnthropicChatModel;
+
+AnthropicChatModel model = AnthropicChatModel.builder()
+    .apiKey(System.getenv("ANTHROPIC_API_KEY"))
+    .modelName("claude-sonnet-4.5")
+    .stream(true)
+    .build();
+```
+
+## Spring Boot
+
+Spring Boot applications can use the Anthropic starter:
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-anthropic-spring-boot-starter</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+Full builder options, formatters, credentials, and registry context details are covered in [Model](../../docs/building-blocks/model.md).
+
+---
+
+Source: https://java.agentscope.io/_sources/v2/en/integration/model/ollama.md
+
+# Ollama Model
+
+`agentscope-extensions-model-ollama` integrates locally hosted Ollama models. It is useful for local development, private deployments, and offline model serving.
+
+## Add the dependency
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-model-ollama</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+## ModelRegistry
+
+Use the `ollama:<model>` id. `OLLAMA_BASE_URL` is optional and defaults to the local Ollama endpoint when omitted.
+
+```java
+ReActAgent agent = ReActAgent.builder()
+    .name("assistant")
+    .model("ollama:llama3") // Resolved internally by ModelRegistry.resolve(modelId)
+    .build();
+```
+
+## Explicit builder
+
+Use the builder when you need a non-default Ollama endpoint, formatter, transport, proxy, or Ollama options:
+
+```java
+import io.agentscope.extensions.model.ollama.OllamaChatModel;
+
+OllamaChatModel model = OllamaChatModel.builder()
+    .modelName("llama3")
+    .baseUrl("http://localhost:11434")
+    .build();
+```
+
+## Spring Boot
+
+Spring Boot applications can use the Ollama starter:
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-ollama-spring-boot-starter</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+Configure the local Ollama model with `agentscope.model.provider=ollama`. The base URL
+is optional and defaults to `http://localhost:11434`:
+
+```yaml
+agentscope:
+  model:
+    provider: ollama
+  ollama:
+    model-name: llama3
+    # base-url: http://localhost:11434
+```
+
+Full builder options, formatters, credentials, and registry context details are covered in [Model](../../docs/building-blocks/model.md).
 
 ---
 
@@ -9808,19 +10417,32 @@ Source: https://java.agentscope.io/_sources/v2/en/integration/protocol/agui.md
 
 # AG-UI
 
-`agentscope-extensions-agui` converts AgentScope event streams into [AG-UI Protocol](https://github.com/ag-ui-protocol/ag-ui) events so front-end UIs (Vercel AG-UI, custom chat UIs) can render the Agent's runtime — text, tool calls, and reasoning (ThinkingBlock).
+`agentscope-extensions-agui` converts AgentScope v2 `AgentEvent` streams into [AG-UI Protocol](https://github.com/ag-ui-protocol/ag-ui) events so front-end UIs can render an agent run in real time, including text, reasoning, tool calls, state, custom events, token usage, and HITL interrupts.
 
-## When to use
+## When To Use
 
-- You need to feed AG-UI-compatible front-end components.
-- You want users to see tool calls and the model's reasoning streaming in.
+- You need to connect an AgentScope agent to an AG-UI-compatible front end or a custom chat UI.
+- You need to stream `RUN_*`, `TEXT_MESSAGE_*`, `TOOL_CALL_*`, `CUSTOM`, and related AG-UI events over SSE.
+- You need frontend tools, user-approval interrupts, runtime context propagation, or custom event-conversion extensions.
 
-## Add the dependency
+## Add Dependencies
+
+For manual adapter usage, add:
 
 ```xml
 <dependency>
     <groupId>io.agentscope</groupId>
     <artifactId>agentscope-extensions-agui</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+Spring Boot applications can use the starter:
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-agui-spring-boot-starter</artifactId>
     <version>${agentscope.version}</version>
 </dependency>
 ```
@@ -9835,7 +10457,8 @@ import io.agentscope.core.agui.model.RunAgentInput;
 import reactor.core.publisher.Flux;
 
 AguiAdapterConfig config = AguiAdapterConfig.builder()
-    .enableReasoning(true)        // emit ThinkingBlock as REASONING_* events
+    .enableReasoning(true)
+    .emitTokenUsage(true)
     .runTimeout(Duration.ofMinutes(5))
     .build();
 
@@ -9845,31 +10468,235 @@ AguiAgentAdapter adapter = new AguiAgentAdapter(agent, config);
 Flux<AguiEvent> events = adapter.run(runAgentInput);
 ```
 
-The front end provides `runAgentInput` (containing `threadId`, `runId`, `messages`, etc.). The adapter converts messages, calls the Agent's streaming API, and maps the events to AG-UI.
+The front end provides `RunAgentInput`, including `threadId`, `runId`, `messages`, `tools`, `state`等. The adapter converts AG-UI messages to AgentScope `Msg` objects, invokes v2 `streamEvents(...)`, and converts each `AgentEvent` to AG-UI events.
 
-## Event mapping
+## Event Mapping
 
-| AgentScope event / block | AG-UI event |
+The v2 path consumes `AgentEvent`. Built-in converters handle semantic mapping, and unmapped events fall back to the official `RAW` event.
+
+| AgentScope event / content             | AG-UI event |
+|----------------------------------------| --- |
+| `AgentStartEvent`                      | `RUN_STARTED` |
+| `AgentEndEvent`                        | `RUN_FINISHED` |
+| Text                              | `TEXT_MESSAGE_START` / `TEXT_MESSAGE_CONTENT` / `TEXT_MESSAGE_END` |
+| Thinking (`enableReasoning=true`) | `REASONING_MESSAGE_START` / `REASONING_MESSAGE_CONTENT` / `REASONING_MESSAGE_END` |
+| Tool-call and argument deltas          | `TOOL_CALL_START` / `TOOL_CALL_ARGS` / `TOOL_CALL_END` |
+| Tool result                            | `TOOL_CALL_RESULT` |
+| `CustomEvent`                          | `CUSTOM` |
+| token usage (`emitTokenUsage=true`)    | `CUSTOM`, `name=token_usage` |
+| Unmapped `AgentEvent`                  | `RAW`, with official `event` and `source` fields |
+
+Normal `RUN_STARTED` and `RUN_FINISHED` events are driven by upstream `AgentStartEvent` and `AgentEndEvent`. If a normal stream completes without an upstream `AgentEndEvent`, the adapter does not synthesize `RUN_FINISHED`. On errors, the adapter emits a `RUN_ERROR` with a `timestamp`, then emits a fallback `RUN_FINISHED`.
+
+## AG-UI Base Event Properties
+
+Every `AguiEvent` supports the official base event properties: optional `timestamp` and `rawEvent`.
+
+The default config does not enable `BaseEventPropertiesEnricher`, so the framework does not add `timestamp` to every event by default and does not expose internal `AgentEvent` objects as `rawEvent` by default. Enable the default enricher explicitly if you want timestamps filled:
+
+```java
+AguiAdapterConfig config = AguiAdapterConfig.builder()
+    .baseEventPropertiesEnricherEnabled(true)
+    .build();
+```
+
+`BaseEventPropertiesEnricher` only fills a missing `timestamp`; it preserves existing timestamps and does not write `rawEvent`. To expose `rawEvent`, register a custom `AguiEventEnricher`.
+
+The Spring Boot starter does not implicitly enable the default base properties enricher. If you want that behavior, expose a `BaseEventPropertiesEnricher` bean or your own `AguiEventEnricher` bean.
+
+## Custom Converters And Enrichers
+
+`AgentEventConverter` extends or overrides semantic mapping. For the same `AgentEvent` type, a user converter overrides the built-in converter.
+
+```java
+@Bean
+AgentEventConverter customEventConverter() {
+    return new AgentEventConverter() {
+        @Override
+        public Set<Class<? extends AgentEvent>> eventTypes() {
+            return Set.of(CustomEvent.class);
+        }
+
+        @Override
+        public void convert(AgentEvent event, AguiStreamContext context) {
+            CustomEvent customEvent = (CustomEvent) event;
+            context.emit(new AguiEvent.Custom(
+                context.getThreadId(),
+                context.getRunId(),
+                customEvent.getName(),
+                customEvent.getValue()));
+        }
+    };
+}
+```
+
+`AguiEventEnricher` runs after conversion. It is intended for cross-cutting concerns such as `timestamp`, `rawEvent`, tracing fields, or other event decoration. It may modify, append, or filter converter output.
+
+```java
+@Bean
+AguiEventEnricher timestampEnricher() {
+    return (source, events, context) -> events.stream()
+        .map(event -> AguiEvents.withBaseProperties(
+            event,
+            event.timestamp() != null ? event.timestamp() : System.currentTimeMillis(),
+            event.rawEvent()))
+        .toList();
+}
+```
+
+The Spring Boot starter automatically collects `AgentEventConverter` and `AguiEventEnricher` beans and uses `orderedStream()` so `@Order` / `Ordered` are honored.
+
+## Token Usage
+
+Token usage is disabled by default. Manual config:
+
+```java
+AguiAdapterConfig config = AguiAdapterConfig.builder()
+    .emitTokenUsage(true)
+    .build();
+```
+
+Spring Boot config:
+
+```yaml
+agentscope:
+  agui:
+    emit-token-usage: true
+```
+
+When enabled, every `ModelCallEndEvent` with usage emits a `CUSTOM` event: `delta` is the current model-call usage. `cumulative` is the accumulated usage within the current AG-UI run.
+
+## RuntimeContext
+
+`AguiAgentAdapter.run(input, runtimeContext)` accepts a caller-provided `RuntimeContext`. The adapter copies the caller context first, then applies AG-UI protocol metadata so the required defaults are not lost.
+
+| RuntimeContext entry | Source |
 | --- | --- |
-| `EventType.REASONING / SUMMARY` with `TextBlock` | `TEXT_MESSAGE_*` |
-| `EventType.REASONING / SUMMARY` with `ThinkingBlock` | `REASONING_*` (when `enableReasoning=true`) |
-| `ToolUseBlock` | `TOOL_CALL_START` |
-| `EventType.TOOL_RESULT` | `TOOL_CALL_END` |
+| `sessionId` | `RunAgentInput.threadId` |
+| `RunAgentInput.class` | Full `RunAgentInput` |
+| `agui.threadId` | `RunAgentInput.threadId` |
+| `agui.runId` | `RunAgentInput.runId` |
+| `agui.messages` | `RunAgentInput.messages` |
+| `agui.tools` | `RunAgentInput.tools` |
+| `agui.context` | `RunAgentInput.context` |
+| `agui.state` | `RunAgentInput.state` |
+| `agui.forwardedProps` | `RunAgentInput.forwardedProps` |
+| `agui.resume` | `RunAgentInput.resume` |
 
-## Spring Boot integration
+Because `sessionId` always comes from `threadId`, the same agent instance remains isolated across AG-UI threads.
 
-The typical wire-up is a `@PostMapping("/ag-ui")` returning the `Flux<AguiEvent>` as SSE. Alternatively, use `agentscope-agui-spring-boot-starter` to register the controller automatically.
+## Spring Boot Integration
 
-## Common configuration
+The starter registers MVC or WebFlux endpoints automatically. Common config:
 
-| Field | Default | Notes |
-| --- | --- | --- |
-| `toolMergeMode` | `MERGE_FRONTEND_PRIORITY` | How front-end-defined tools merge with Agent-side tools |
-| `emitStateEvents` | `true` | Emit `STATE_*` events (e.g. thread state) |
-| `emitToolCallArgs` | `true` | Stream tool-call arguments |
-| `enableReasoning` | `false` | Emit ThinkingBlock as REASONING_* events |
-| `runTimeout` | `10m` | Per-run timeout |
-| `defaultAgentId` | `null` | Default `agentId` when none is provided |
+```yaml
+agentscope:
+  agui:
+    path-prefix: /agui
+    cors-enabled: true
+    run-timeout: 10m
+    default-agent-id: default
+    enable-path-routing: true
+    agent-id-header: X-Agent-Id
+    emit-state-events: true
+    emit-tool-call-args: true
+    emit-token-usage: false
+    enable-reasoning: false
+    server-side-memory: false
+```
+
+You can extend the default chain with beans:
+
+- `AgentEventConverter`: custom event semantic mapping.
+- `AguiEventEnricher`: cross-cutting event enrichment.
+- `AguiRuntimeContextResolver`: request-scoped `RuntimeContext` injection.
+- `AguiAgentAdapterFactory`: replacement for default `AguiAgentAdapter` construction.
+
+`AguiRuntimeContextResolver` can read the transport, path agent id, header agent id, headers, query params, and native Web request.
+
+```java
+@Bean
+AguiRuntimeContextResolver runtimeContextResolver() {
+    return request -> RuntimeContext.builder()
+        .put("tenantId", request.firstHeader("X-Tenant-Id"))
+        .put("traceId", request.firstHeader("X-Trace-Id"))
+        .build();
+}
+```
+
+`forwardedProps` comes from the client request body and is suitable for UI options or frontend context. Do not treat it as a trusted identity source; server-side user identity should come from authentication or a server-side resolver.
+
+## Frontend Tools And Merge Mode
+
+An AG-UI front end can pass tool schemas through `RunAgentInput.tools`. The adapter injects those tools into the agent toolkit at the start of one run and cleans them up after the run completes or is cancelled.
+
+| `ToolMergeMode` | Behavior |
+| --- | --- |
+| `FRONTEND_ONLY` | Use only frontend-provided tools and temporarily hide existing agent tools |
+| `AGENT_ONLY` | Ignore frontend-provided tools and use only the agent toolkit |
+| `MERGE_FRONTEND_PRIORITY` | Merge both sides; frontend tools win on name conflicts |
+
+The default is `MERGE_FRONTEND_PRIORITY`. Injection is run scoped and does not permanently mutate the agent toolkit.
+
+## HITL Interrupts
+
+When the model requests a tool and suspension is needed for user approval or external execution, the AG-UI adapter converts the suspended result into a `RUN_FINISHED` interrupt outcome:
+
+```json
+{
+  "type": "RUN_FINISHED",
+  "outcome": {
+    "type": "interrupt",
+    "interrupts": [
+      {
+        "reason": "tool_call",
+        "toolCallId": "call-1",
+        "message": "Need approval before running this tool",
+        "metadata": {
+          "toolName": "request_approval"
+        }
+      }
+    ]
+  }
+}
+```
+
+The front end can show an approval or external-execution UI. After the user acts, send the official `resume[]` field on the next `runAgent` request for the same `threadId`:
+
+```json
+{
+  "threadId": "thread-1",
+  "runId": "run-2",
+  "messages": [],
+  "resume": [
+    {
+      "interruptId": "reply-1:call-1",
+      "status": "resolved",
+      "payload": {
+        "approved": true
+      }
+    }
+  ]
+}
+```
+
+`status` supports the official `resolved` and `cancelled` values. For the common approval case where a user rejects a tool request, prefer `resolved` and express the business decision in `payload`, for example `{ "approved": false }`; use `cancelled` when the interrupt itself is cancelled.
+
+AgentScope Java bridges tool-call `resume[]` entries to the `ToolResultBlock` messages required by core so the suspended tool call can continue. Through the Spring `AguiRequestProcessor` entry point, the processor records the latest `RUN_FINISHED.outcome.interrupts[]` and resolves the real `toolCallId` by `interruptId`.
+
+The built-in resume path currently covers tool-call interrupts generated by the AG-UI adapter. Custom interrupts with different semantics usually need a custom `AgentEventConverter` / `AguiEventEnricher` or request-processing layer to interpret their `payload`.
+
+## Example Project
+
+See the complete example at [agentscope-examples/agui](https://github.com/agentscope-ai/agentscope-java/tree/main/agentscope-examples/agui):
+
+```bash
+export DASHSCOPE_API_KEY=your-key
+cd agentscope-examples/agui
+mvn spring-boot:run
+```
+
+Visit http://localhost:8080 after startup. The example demonstrates multi-agent routing, custom converters, custom enrichers, token usage, and HITL interrupts.
 
 ---
 
